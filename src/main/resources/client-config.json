@@ -1,0 +1,13 @@
+{
+  "backendUrl": "http://127.0.0.1:8080",
+  "email": "",
+  "password": "",
+  "transformerId": null,
+  "pollIntervalMs": 3000,
+  "configRefreshMs": 10000,
+  "reconnectDelayMs": 3000,
+  "modbusTimeoutMs": 3000,
+  "modbusRetries": 2,
+  "modbusDiscardDelayMs": 150,
+  "interRegisterDelayMs": 30
+}
