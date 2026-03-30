@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.io.PrintWriter
 import java.io.StringWriter
+import com.serotonin.modbus4j.ModbusMaster
 
 class ClientController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -28,7 +29,7 @@ class ClientController {
     private val loginInProgress = AtomicBoolean(false)
     private val configWatcherStarted = AtomicBoolean(false)
     private val configWatcherRunning = AtomicBoolean(false)
-    private val meterJobs = ConcurrentHashMap<Long, kotlinx.coroutines.Job>()
+    private val portJobs = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
     private val meterRegisters = ConcurrentHashMap<Long, AtomicReference<List<RegisterDto>>>()
 
     fun start() {
@@ -85,8 +86,8 @@ class ClientController {
     fun logout() {
         scope.launch {
             configWatcherRunning.set(false)
-            meterJobs.values.forEach { it.cancel() }
-            meterJobs.clear()
+            portJobs.values.forEach { it.cancel() }
+            portJobs.clear()
             meterRegisters.clear()
             api.clearSession()
             _state.update {
@@ -123,10 +124,13 @@ class ClientController {
         }
         val meters = api.fetchMeters(transformer.id).filter { it.enabled }
         val meterIds = meters.map { it.id }.toSet()
+        val activePorts = meters.map { it.serialPort }.toSet()
 
-        meterJobs.keys.filter { it !in meterIds }.forEach { removedId ->
-            meterJobs.remove(removedId)?.cancel()
+        meterRegisters.keys.filter { it !in meterIds }.forEach { removedId ->
             meterRegisters.remove(removedId)
+        }
+        portJobs.keys.filter { it !in activePorts }.forEach { removedPort ->
+            portJobs.remove(removedPort)?.cancel()
         }
 
         val currentMeters = _state.value.meters.associateBy { it.meter.id }
@@ -140,7 +144,6 @@ class ClientController {
                 existingRegs[reg.id]?.copy(register = reg) ?: RegisterState(reg, null, null)
             }
 
-            ensureMeterPolling(transformer.id, meter)
             MeterState(
                 meter = meter,
                 connectionStatus = existing?.connectionStatus ?: "CONNECTING",
@@ -148,6 +151,7 @@ class ClientController {
                 lastError = existing?.lastError
             )
         }
+        ensurePortPolling(transformer.id, meters)
 
         _state.update {
             it.copy(
@@ -158,12 +162,30 @@ class ClientController {
         }
     }
 
-    private fun ensureMeterPolling(transformerId: String, meter: MeterDto) {
-        if (meterJobs.containsKey(meter.id)) return
-        val job = scope.launch {
-            pollMeter(transformerId, meter)
+    private fun ensurePortPolling(transformerId: String, meters: List<MeterDto>) {
+        val metersByPort = meters.groupBy { it.serialPort }
+        metersByPort.forEach { (serialPort, portMeters) ->
+            if (portJobs.containsKey(serialPort)) return@forEach
+            validatePortMeters(serialPort, portMeters)
+            val job = scope.launch {
+                pollPort(transformerId, serialPort)
+            }
+            portJobs[serialPort] = job
         }
-        meterJobs[meter.id] = job
+    }
+
+    private fun validatePortMeters(serialPort: String, meters: List<MeterDto>) {
+        val reference = meters.firstOrNull() ?: return
+        meters.forEach { meter ->
+            check(
+                meter.baudRate == reference.baudRate &&
+                    meter.dataBits == reference.dataBits &&
+                    meter.stopBits == reference.stopBits &&
+                    meter.parity == reference.parity
+            ) {
+                "Meters na porcie $serialPort maja rozne parametry transmisji"
+            }
+        }
     }
 
     private suspend fun resolveTransformer(): TransformerDto? {
@@ -175,65 +197,105 @@ class ClientController {
         }
     }
 
-    private suspend fun pollMeter(transformerId: String, meter: MeterDto) {
+    private suspend fun pollPort(transformerId: String, serialPort: String) {
         while (true) {
-            var master: com.serotonin.modbus4j.ModbusMaster? = null
-            try {
-                updateMeterStatus(meter.id, "CONNECTING", null)
-                master = modbus.connect(meter)
-                updateMeterStatus(meter.id, "CONNECTED", null)
+            val meters = _state.value.meters.map { it.meter }.filter { it.serialPort == serialPort }
+            if (meters.isEmpty()) return
 
+            val templateMeter = meters.first()
+            var master: ModbusMaster? = null
+            try {
+                master = modbus.connect(templateMeter)
+                meters.forEach { meter -> updateMeterStatus(meter.id, "CONNECTED", null) }
                 while (true) {
-                    val now = Instant.now()
-                    val registers = meterRegisters[meter.id]?.get().orEmpty()
-                    registers.forEach { register ->
-                        try {
-                            val value = modbus.readValue(master, meter, register)
-                            updateRegisterValue(meter.id, register.id, value, now)
-                            val metric = MetricPointRequest(
-                                key = "${meter.deviceCode}.${register.name}",
-                                value = value,
-                                timestamp = now.toString(),
-                                unit = register.unit,
-                                label = register.name
-                            )
-                            api.sendMetricWs(transformerId, metric)
-                        } catch (ex: Exception) {
-                            if (ex is CancellationException) throw ex
-                            logError(
-                                "Blad odczytu/wysylki: meterId=${meter.id}, registerId=${register.id}, " +
-                                    "port=${meter.serialPort}, addr=${register.address}, type=${register.registerType}",
-                                ex
-                            )
-                            updateMeterStatus(meter.id, "ERROR", ex.message)
-                            postTransformerError(
-                                transformerId,
-                                code = "MODBUS_READ",
-                                message = "Meter ${meter.id} reg ${register.id}: ${ex.message}",
-                                status = "ERROR"
-                            )
+                    val loopStart = Instant.now()
+                    val currentMeters = _state.value.meters.map { it.meter }.filter { it.serialPort == serialPort }
+                    if (currentMeters.isEmpty()) break
+                    currentMeters.forEach { meter ->
+                        updateMeterStatus(meter.id, "CONNECTED", null)
+                        val registers = meterRegisters[meter.id]?.get().orEmpty()
+                        registers.forEach { register ->
+                            try {
+                                val value = modbus.readValue(master, meter, register)
+                                updateRegisterValue(meter.id, register.id, value, loopStart)
+                                val metric = MetricPointRequest(
+                                    key = "${meter.deviceCode}.${register.name}",
+                                    value = value,
+                                    timestamp = loopStart.toString(),
+                                    unit = register.unit,
+                                    label = register.name
+                                )
+                                api.sendMetricWs(transformerId, metric)
+                            } catch (ex: Exception) {
+                                if (ex is CancellationException) throw ex
+                                if (shouldReconnectModbus(ex)) {
+                                    throw ModbusReconnectException(
+                                        "Port ${meter.serialPort} wymaga reconnect po bledzie odczytu: ${ex.message}",
+                                        ex
+                                    )
+                                }
+                                logError(
+                                    "Blad odczytu/wysylki: meterId=${meter.id}, registerId=${register.id}, " +
+                                        "port=${meter.serialPort}, addr=${register.address}, type=${register.registerType}",
+                                    ex
+                                )
+                                updateMeterStatus(meter.id, "ERROR", ex.message)
+                                postTransformerError(
+                                    transformerId,
+                                    code = "MODBUS_READ",
+                                    message = "Meter ${meter.id} reg ${register.id}: ${ex.message}",
+                                    status = "ERROR"
+                                )
+                            }
+                            if (config.interRegisterDelayMs > 0) {
+                                delay(config.interRegisterDelayMs)
+                            }
                         }
-                        if (config.interRegisterDelayMs > 0) {
-                            delay(config.interRegisterDelayMs)
+                        val meterDelay = meter.pollIntervalMs ?: config.pollIntervalMs
+                        if (meterDelay > 0) {
+                            delay(meterDelay)
                         }
                     }
-                    delay(meter.pollIntervalMs ?: config.pollIntervalMs)
                 }
             } catch (ex: Exception) {
                 if (ex is CancellationException) throw ex
-                logError("Blad polaczenia Modbus: meterId=${meter.id}, port=${meter.serialPort}", ex)
-                updateMeterStatus(meter.id, "ERROR", ex.message)
-                postTransformerError(
-                    transformerId,
-                    code = "MODBUS_CONNECT",
-                    message = "Meter ${meter.id} port ${meter.serialPort}: ${ex.message}",
-                    status = "ERROR"
-                )
+                logError("Blad polaczenia Modbus: port=$serialPort", ex)
+                meters.forEach { meter ->
+                    updateMeterStatus(meter.id, "ERROR", ex.message)
+                    postTransformerError(
+                        transformerId,
+                        code = "MODBUS_CONNECT",
+                        message = "Meter ${meter.id} port ${meter.serialPort}: ${ex.message}",
+                        status = "ERROR"
+                    )
+                }
                 delay(config.reconnectDelayMs)
             } finally {
                 master?.destroy()
             }
         }
+    }
+
+    private fun shouldReconnectModbus(ex: Throwable): Boolean {
+        generateSequence(ex) { it.cause }.forEach { cause ->
+            val message = cause.message?.lowercase().orEmpty()
+            val className = cause::class.qualifiedName.orEmpty()
+            val simpleName = cause::class.simpleName.orEmpty()
+            if (
+                "modbustransportexception" in simpleName.lowercase() ||
+                "ioexception" in simpleName.lowercase() ||
+                "serialport" in className.lowercase() ||
+                "timeout" in message ||
+                "listener" in message ||
+                "broken pipe" in message ||
+                "port closed" in message ||
+                "reset" in message ||
+                "cannot invoke" in message
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun updateMeterStatus(meterId: Long, status: String, error: String?) {
@@ -321,3 +383,5 @@ class ClientController {
         }
     }
 }
+
+private class ModbusReconnectException(message: String, cause: Throwable) : RuntimeException(message, cause)

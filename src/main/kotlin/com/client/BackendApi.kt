@@ -35,6 +35,7 @@ class BackendApi(private val config: ClientConfig) {
     private val refreshToken = AtomicReference<String?>(null)
     private val wsSession = AtomicReference<io.ktor.client.plugins.websocket.DefaultClientWebSocketSession?>(null)
     private val wsMutex = Mutex()
+    private val refreshMutex = Mutex()
 
     suspend fun login(email: String, password: String) {
         val response: AuthResponse = client.post("${config.backendUrl}/auth/login") {
@@ -43,6 +44,7 @@ class BackendApi(private val config: ClientConfig) {
         }.body()
         accessToken.set(response.accessToken)
         refreshToken.set(response.refreshToken)
+        wsSession.getAndSet(null)?.close()
     }
 
     suspend fun clearSession() {
@@ -64,12 +66,13 @@ class BackendApi(private val config: ClientConfig) {
     }
 
     suspend fun sendMetricWs(transformerId: String, metric: MetricPointRequest) {
-        val session = ensureWsSession(transformerId)
         val payload = json.encodeToString(metric)
         try {
+            val session = ensureWsSession(transformerId)
             session.send(Frame.Text(payload))
         } catch (ex: Exception) {
             wsSession.getAndSet(null)?.close()
+            refreshAccessTokenIfNeeded()
             val retry = ensureWsSession(transformerId)
             retry.send(Frame.Text(payload))
         }
@@ -80,10 +83,18 @@ class BackendApi(private val config: ClientConfig) {
             val existing = wsSession.get()
             if (existing != null && !existing.incoming.isClosedForReceive) return@withLock existing
             val token = accessToken.get() ?: error("Brak access tokena. Najpierw login().")
-            val wsUrl = buildWsUrl(transformerId, token)
-            val session = client.webSocketSession(wsUrl)
-            wsSession.set(session)
-            session
+            try {
+                val session = client.webSocketSession(buildWsUrl(transformerId, token))
+                wsSession.set(session)
+                session
+            } catch (ex: ClientRequestException) {
+                if (ex.response.status.value != 401) throw ex
+                refreshAccessTokenIfNeeded(token)
+                val refreshedToken = accessToken.get() ?: error("Brak access tokena po refreshu.")
+                val session = client.webSocketSession(buildWsUrl(transformerId, refreshedToken))
+                wsSession.set(session)
+                session
+            }
         }
     }
 
@@ -124,7 +135,7 @@ class BackendApi(private val config: ClientConfig) {
             block()
         } catch (ex: ClientRequestException) {
             if (ex.response.status.value == 401) {
-                refreshAccessToken()
+                refreshAccessTokenIfNeeded()
                 block()
             } else {
                 throw ex
@@ -132,12 +143,20 @@ class BackendApi(private val config: ClientConfig) {
         }
     }
 
-    private suspend fun refreshAccessToken() {
-        val token = refreshToken.get() ?: error("Brak refresh tokena. Najpierw login().")
-        val response: RefreshResponse = client.post("${config.backendUrl}/auth/refresh") {
-            contentType(ContentType.Application.Json)
-            setBody(RefreshRequest(token))
-        }.body()
-        accessToken.set(response.accessToken)
+    private suspend fun refreshAccessTokenIfNeeded(failedAccessToken: String? = null) {
+        refreshMutex.withLock {
+            val currentAccessToken = accessToken.get()
+            if (failedAccessToken != null && currentAccessToken != null && currentAccessToken != failedAccessToken) {
+                return
+            }
+
+            val token = refreshToken.get() ?: error("Brak refresh tokena. Najpierw login().")
+            val response: RefreshResponse = client.post("${config.backendUrl}/auth/refresh") {
+                contentType(ContentType.Application.Json)
+                setBody(RefreshRequest(token))
+            }.body()
+            accessToken.set(response.accessToken)
+            wsSession.getAndSet(null)?.close()
+        }
     }
 }

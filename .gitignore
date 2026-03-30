@@ -43,3 +43,12 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+
+.gradle/
+.gradle-user-home/
+build/
+out/
+.idea/
+*.iml
+local.properties
