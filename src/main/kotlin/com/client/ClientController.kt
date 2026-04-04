@@ -95,6 +95,7 @@ class ClientController {
                     status = "Wylogowano.",
                     transformer = null,
                     meters = emptyList(),
+                    motorControl = null,
                     isLoggedIn = false,
                     loginError = null
                 )
@@ -141,7 +142,9 @@ class ClientController {
             val existing = currentMeters[meter.id]
             val existingRegs = existing?.registers?.associateBy { it.register.id } ?: emptyMap()
             val registerStates = registers.map { reg ->
-                existingRegs[reg.id]?.copy(register = reg) ?: RegisterState(reg, null, null)
+                val registerWithLocalSettings = applyLocalSettings(meter.id, reg)
+                existingRegs[reg.id]?.copy(register = registerWithLocalSettings)
+                    ?: RegisterState(meter.id, registerWithLocalSettings, null, null)
             }
 
             MeterState(
@@ -157,8 +160,106 @@ class ClientController {
             it.copy(
                 status = "Konfiguracja OK",
                 transformer = transformer,
-                meters = updatedMeterStates
+                meters = updatedMeterStates,
+                motorControl = mergeMotorControlState(updatedMeterStates, it.motorControl)
             )
+        }
+    }
+
+    fun startMotor() {
+        scope.launch {
+            executeMotorCommand("Start silnika") { current, meter, master ->
+                current.config.directionPin?.let { pin ->
+                    val directionValue = when (current.direction) {
+                        MotorDirection.FORWARD -> current.config.forwardValue
+                        MotorDirection.REVERSE -> current.config.reverseValue
+                    }
+                    modbus.writeValue(master, meter, pin, directionValue)
+                }
+                current.config.speedPin?.let { pin ->
+                    modbus.writeValue(master, meter, pin, current.speedSetpoint)
+                }
+                current.config.runPin?.let { pin ->
+                    modbus.writeValue(master, meter, pin, pin.activeValue)
+                }
+                current.copy(isRunning = true)
+            }
+        }
+    }
+
+    fun stopMotor() {
+        scope.launch {
+            executeMotorCommand("Stop silnika") { current, meter, master ->
+                current.config.runPin?.let { pin ->
+                    modbus.writeValue(master, meter, pin, pin.inactiveValue)
+                }
+                current.copy(isRunning = false)
+            }
+        }
+    }
+
+    fun setMotorDirection(direction: MotorDirection) {
+        scope.launch {
+            executeMotorCommand(
+                label = if (direction == MotorDirection.FORWARD) "Kierunek przod" else "Kierunek tyl",
+                updateStateOnly = false
+            ) { current, meter, master ->
+                current.config.directionPin?.let { pin ->
+                    val directionValue = when (direction) {
+                        MotorDirection.FORWARD -> current.config.forwardValue
+                        MotorDirection.REVERSE -> current.config.reverseValue
+                    }
+                    modbus.writeValue(master, meter, pin, directionValue)
+                }
+                current.copy(direction = direction)
+            }
+        }
+    }
+
+    fun setMotorSpeed(speedText: String) {
+        scope.launch {
+            val speed = speedText.replace(',', '.').toDoubleOrNull()
+            if (speed == null) {
+                updateMotorStatus("Nieprawidlowa wartosc predkosci")
+                return@launch
+            }
+            executeMotorCommand("Zadanie predkosci $speed", updateStateOnly = false) { current, meter, master ->
+                current.config.speedPin?.let { pin ->
+                    modbus.writeValue(master, meter, pin, speed)
+                }
+                current.copy(speedSetpoint = speed)
+            }
+        }
+    }
+
+    fun saveRegisterThresholds(meterId: Long, registerId: Long, targetText: String, thresholdText: String) {
+        scope.launch {
+            val targetResult = parseOptionalDouble(targetText)
+            val thresholdResult = parseOptionalDouble(thresholdText)
+            if (!targetResult.valid || !thresholdResult.valid) {
+                _state.update { it.copy(status = "Nieprawidlowa wartosc docelowa lub progowa.") }
+                return@launch
+            }
+
+            val updatedSettings = config.localRegisterSettings
+                .filterNot { it.meterId == meterId && it.registerId == registerId }
+                .toMutableList()
+
+            if (targetResult.value != null || thresholdResult.value != null) {
+                updatedSettings.add(
+                    LocalRegisterSettings(
+                        meterId = meterId,
+                        registerId = registerId,
+                        targetValue = targetResult.value,
+                        thresholdValue = thresholdResult.value
+                    )
+                )
+            }
+
+            config = config.copy(localRegisterSettings = updatedSettings)
+            ConfigLoader.save(config)
+            applyLocalRegisterSettings(meterId, registerId)
+            _state.update { it.copy(status = "Zapisano lokalne ustawienia rejestru.") }
         }
     }
 
@@ -327,6 +428,7 @@ class ClientController {
     }
 
     private fun updateRegisterValue(meterId: Long, registerId: Long, value: Double, time: Instant) {
+        var alarmTransition: RegisterAlarmTransition? = null
         _state.update { current ->
             current.copy(
                 meters = current.meters.map { meterState ->
@@ -334,7 +436,21 @@ class ClientController {
                         meterState.copy(
                             registers = meterState.registers.map { regState ->
                                 if (regState.register.id == registerId) {
-                                    regState.copy(value = value, lastUpdate = time)
+                                    val alarmActive = isAlarmActive(regState.register, value)
+                                    if (regState.alarmActive != alarmActive) {
+                                        alarmTransition = RegisterAlarmTransition(
+                                            meter = meterState.meter,
+                                            register = regState.register,
+                                            value = value,
+                                            active = alarmActive
+                                        )
+                                    }
+                                    regState.copy(
+                                        value = value,
+                                        lastUpdate = time,
+                                        alarmActive = alarmActive,
+                                        alarmMessage = buildAlarmMessage(regState.register, value, alarmActive)
+                                    )
                                 } else {
                                     regState
                                 }
@@ -345,6 +461,152 @@ class ClientController {
                     }
                 }
             )
+        }
+        val transition = alarmTransition ?: return
+        val status = if (transition.active) "ALARM" else "OK"
+        val message = if (transition.active) {
+            "${transition.meter.name}/${transition.register.name}: przekroczono prog ${transition.register.thresholdValue} (odczyt ${transition.value})"
+        } else {
+            "${transition.meter.name}/${transition.register.name}: alarm skasowany, odczyt ${transition.value}"
+        }
+        postTransformerError(
+            transformerId = _state.value.transformer?.id ?: return,
+            code = "REGISTER_THRESHOLD",
+            message = message,
+            status = status
+        )
+    }
+
+    private fun applyLocalRegisterSettings(meterId: Long, registerId: Long) {
+        _state.update { current ->
+            current.copy(
+                meters = current.meters.map { meterState ->
+                    if (meterState.meter.id != meterId) {
+                        meterState
+                    } else {
+                        meterState.copy(
+                            registers = meterState.registers.map { regState ->
+                                if (regState.register.id != registerId) {
+                                    regState
+                                } else {
+                                    val updatedRegister = applyLocalSettings(meterId, regState.register)
+                                    val alarmActive = regState.value?.let { isAlarmActive(updatedRegister, it) } ?: false
+                                    regState.copy(
+                                        register = updatedRegister,
+                                        alarmActive = alarmActive,
+                                        alarmMessage = regState.value?.let {
+                                            buildAlarmMessage(updatedRegister, it, alarmActive)
+                                        }
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    private fun mergeMotorControlState(
+        meters: List<MeterState>,
+        existing: MotorControlState?
+    ): MotorControlState? {
+        val config = config.motorControl?.takeIf { it.enabled } ?: return null
+        val meter = config.meterId?.let { targetId -> meters.firstOrNull { it.meter.id == targetId }?.meter }
+            ?: meters.firstOrNull()?.meter
+        return if (existing == null || existing.config != config || existing.meter?.id != meter?.id) {
+            MotorControlState(
+                config = config,
+                meter = meter,
+                available = meter != null,
+                isRunning = existing?.isRunning ?: false,
+                direction = existing?.direction ?: MotorDirection.FORWARD,
+                speedSetpoint = existing?.speedSetpoint ?: config.defaultSpeed,
+                lastCommandStatus = existing?.lastCommandStatus,
+                lastCommandAt = existing?.lastCommandAt
+            )
+        } else {
+            existing.copy(config = config, meter = meter, available = meter != null)
+        }
+    }
+
+    private suspend fun executeMotorCommand(
+        label: String,
+        updateStateOnly: Boolean = true,
+        action: (MotorControlState, MeterDto, ModbusMaster) -> MotorControlState
+    ) {
+        val current = _state.value.motorControl
+        if (current == null) {
+            _state.update { it.copy(status = "Sterowanie silnikiem nie jest skonfigurowane.") }
+            return
+        }
+        val meter = current.meter
+        if (meter == null) {
+            updateMotorStatus("Brak przypisanego metra dla sterowania silnikiem")
+            return
+        }
+        var master: ModbusMaster? = null
+        try {
+            master = modbus.connect(meter)
+            val updated = action(current, meter, master)
+            _state.update {
+                it.copy(
+                    motorControl = updated.copy(
+                        lastCommandStatus = "$label OK",
+                        lastCommandAt = Instant.now()
+                    ),
+                    status = if (updateStateOnly) "Sterowanie silnikiem gotowe" else "$label OK"
+                )
+            }
+        } catch (ex: Exception) {
+            if (ex is CancellationException) throw ex
+            logError("Blad sterowania silnikiem", ex)
+            updateMotorStatus("$label: ${ex.message}")
+        } finally {
+            master?.destroy()
+        }
+    }
+
+    private fun updateMotorStatus(status: String) {
+        _state.update { current ->
+            current.copy(
+                status = status,
+                motorControl = current.motorControl?.copy(
+                    lastCommandStatus = status,
+                    lastCommandAt = Instant.now()
+                )
+            )
+        }
+    }
+
+    private fun isAlarmActive(register: RegisterDto, value: Double): Boolean {
+        val threshold = register.thresholdValue ?: return false
+        return value > threshold
+    }
+
+    private fun applyLocalSettings(meterId: Long, register: RegisterDto): RegisterDto {
+        val local = config.localRegisterSettings.firstOrNull {
+            it.meterId == meterId && it.registerId == register.id
+        } ?: return register.copy(targetValue = null, thresholdValue = null)
+        return register.copy(
+            targetValue = local.targetValue,
+            thresholdValue = local.thresholdValue
+        )
+    }
+
+    private fun parseOptionalDouble(text: String): ParsedOptionalDouble {
+        val normalized = text.trim()
+        if (normalized.isEmpty()) return ParsedOptionalDouble(valid = true, value = null)
+        val parsed = normalized.replace(',', '.').toDoubleOrNull()
+        return ParsedOptionalDouble(valid = parsed != null, value = parsed)
+    }
+
+    private fun buildAlarmMessage(register: RegisterDto, value: Double, active: Boolean): String? {
+        val threshold = register.thresholdValue ?: return null
+        return if (active) {
+            "Alarm: $value > prog $threshold"
+        } else {
+            null
         }
     }
 
@@ -385,3 +647,15 @@ class ClientController {
 }
 
 private class ModbusReconnectException(message: String, cause: Throwable) : RuntimeException(message, cause)
+
+private data class RegisterAlarmTransition(
+    val meter: MeterDto,
+    val register: RegisterDto,
+    val value: Double,
+    val active: Boolean
+)
+
+private data class ParsedOptionalDouble(
+    val valid: Boolean,
+    val value: Double?
+)

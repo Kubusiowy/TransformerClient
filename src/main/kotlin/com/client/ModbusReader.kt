@@ -34,31 +34,8 @@ class ModbusReader(private val config: ClientConfig) {
     }
 
     fun readValue(master: ModbusMaster, meter: MeterDto, register: RegisterDto): Double {
-        val registerType = register.registerType.uppercase()
-        val dataTypeName = register.dataType.uppercase()
-        val range = when (registerType) {
-            "INPUT" -> RegisterRange.INPUT_REGISTER
-            else -> RegisterRange.HOLDING_REGISTER
-        }
         val offset = normalizeAddress(register.address)
-        val dataType = when (dataTypeName) {
-            "INT16" -> DataType.TWO_BYTE_INT_SIGNED
-            "INT32" -> if (meter.byteOrder.uppercase() == "LITTLE_ENDIAN") {
-                DataType.FOUR_BYTE_INT_SIGNED_SWAPPED
-            } else {
-                DataType.FOUR_BYTE_INT_SIGNED
-            }
-            "FLOAT32" -> if (meter.byteOrder.uppercase() == "LITTLE_ENDIAN") {
-                DataType.FOUR_BYTE_FLOAT_SWAPPED
-            } else {
-                DataType.FOUR_BYTE_FLOAT
-            }
-            else -> DataType.TWO_BYTE_INT_SIGNED
-        }
-        val locator = when (range) {
-            RegisterRange.INPUT_REGISTER -> BaseLocator.inputRegister(meter.slaveId, offset, dataType)
-            else -> BaseLocator.holdingRegister(meter.slaveId, offset, dataType)
-        }
+        val locator = createLocator(meter, register.registerType, register.dataType, offset)
         return try {
             val raw = master.getValue(locator)
             val value = when (raw) {
@@ -74,6 +51,54 @@ class ModbusReader(private val config: ClientConfig) {
                 ex
             )
             throw ex
+        }
+    }
+
+    fun writeValue(master: ModbusMaster, meter: MeterDto, point: WritePointConfig, value: Double) {
+        val offset = normalizeAddress(point.address)
+        val locator = createLocator(meter, point.registerType, point.dataType, offset)
+        val scaledValue = if (point.scale == 0.0) value else value / point.scale
+        val payload: Any = when (point.dataType.uppercase()) {
+            "BOOLEAN", "BOOL" -> scaledValue >= 0.5
+            "FLOAT32" -> scaledValue.toFloat()
+            "INT32" -> scaledValue.toLong().toInt()
+            else -> scaledValue.toInt()
+        }
+        try {
+            master.setValue(locator, payload)
+        } catch (ex: Exception) {
+            logError(
+                "Modbus write: slaveId=${meter.slaveId}, port=${meter.serialPort}, " +
+                    "pin=${point.pinName}, regType=${point.registerType}, dataType=${point.dataType}, addr=${point.address}",
+                ex
+            )
+            throw ex
+        }
+    }
+
+    private fun createLocator(meter: MeterDto, registerType: String, dataTypeName: String, offset: Int): BaseLocator<*> {
+        val type = registerType.uppercase()
+        return when (type) {
+            "COIL" -> BaseLocator.coilStatus(meter.slaveId, offset)
+            "INPUT" -> BaseLocator.inputRegister(meter.slaveId, offset, resolveDataType(meter, dataTypeName))
+            else -> BaseLocator.holdingRegister(meter.slaveId, offset, resolveDataType(meter, dataTypeName))
+        }
+    }
+
+    private fun resolveDataType(meter: MeterDto, dataTypeName: String): Int {
+        return when (dataTypeName.uppercase()) {
+            "INT16" -> DataType.TWO_BYTE_INT_SIGNED
+            "INT32" -> if (meter.byteOrder.uppercase() == "LITTLE_ENDIAN") {
+                DataType.FOUR_BYTE_INT_SIGNED_SWAPPED
+            } else {
+                DataType.FOUR_BYTE_INT_SIGNED
+            }
+            "FLOAT32" -> if (meter.byteOrder.uppercase() == "LITTLE_ENDIAN") {
+                DataType.FOUR_BYTE_FLOAT_SWAPPED
+            } else {
+                DataType.FOUR_BYTE_FLOAT
+            }
+            else -> DataType.TWO_BYTE_INT_SIGNED
         }
     }
 

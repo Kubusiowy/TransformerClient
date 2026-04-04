@@ -17,7 +17,9 @@ data class ClientConfig(
     val modbusRetries: Int = 1,
     val modbusDiscardDelayMs: Int = 50,
     val interRegisterDelayMs: Long = 0,
-    val rememberCredentials: Boolean = false
+    val rememberCredentials: Boolean = false,
+    val localRegisterSettings: List<LocalRegisterSettings> = emptyList(),
+    val motorControl: MotorControlConfig? = null
 )
 
 @Serializable
@@ -76,6 +78,8 @@ data class RegisterDto(
     val length: Int,
     val dataType: String,
     val scale: Double? = 1.0,
+    val targetValue: Double? = null,
+    val thresholdValue: Double? = null,
     val unit: String? = null,
     val enabled: Boolean,
     val orderIndex: Int? = null
@@ -101,6 +105,7 @@ data class AppState(
     val status: String,
     val transformer: TransformerDto?,
     val meters: List<MeterState>,
+    val motorControl: MotorControlState?,
     val isLoggedIn: Boolean,
     val loginError: String?,
     val loginPrefillEmail: String,
@@ -112,6 +117,7 @@ data class AppState(
             status = "Uruchamianie...",
             transformer = null,
             meters = emptyList(),
+            motorControl = null,
             isLoggedIn = false,
             loginError = null,
             loginPrefillEmail = "",
@@ -129,7 +135,58 @@ data class MeterState(
 )
 
 data class RegisterState(
+    val meterId: Long,
     val register: RegisterDto,
     val value: Double?,
-    val lastUpdate: Instant?
+    val lastUpdate: Instant?,
+    val alarmActive: Boolean = false,
+    val alarmMessage: String? = null
 )
+
+@Serializable
+data class LocalRegisterSettings(
+    val meterId: Long,
+    val registerId: Long,
+    val targetValue: Double? = null,
+    val thresholdValue: Double? = null
+)
+
+@Serializable
+data class MotorControlConfig(
+    val enabled: Boolean = false,
+    val name: String = "Silnik",
+    val meterId: Long? = null,
+    val runPin: WritePointConfig? = null,
+    val directionPin: WritePointConfig? = null,
+    val speedPin: WritePointConfig? = null,
+    val defaultSpeed: Double = 0.0,
+    val forwardValue: Double = 1.0,
+    val reverseValue: Double = 0.0
+)
+
+@Serializable
+data class WritePointConfig(
+    val pinName: String,
+    val registerType: String = "HOLDING",
+    val address: Int,
+    val dataType: String = "INT16",
+    val activeValue: Double = 1.0,
+    val inactiveValue: Double = 0.0,
+    val scale: Double = 1.0
+)
+
+data class MotorControlState(
+    val config: MotorControlConfig,
+    val meter: MeterDto?,
+    val available: Boolean,
+    val isRunning: Boolean,
+    val direction: MotorDirection,
+    val speedSetpoint: Double,
+    val lastCommandStatus: String?,
+    val lastCommandAt: Instant?
+)
+
+enum class MotorDirection {
+    FORWARD,
+    REVERSE
+}
