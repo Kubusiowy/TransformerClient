@@ -15,8 +15,8 @@
     "name": "Silnik glowny",
     "meterId": null,
     "gpio": {
-      "stepPin": 18,
-      "directionPin": 23,
+      "stepPin": 23,
+      "directionPin": 22,
       "enablePin": 24,
       "enableActiveLow": true,
       "pwmDutyCycle": 128
