@@ -14,6 +14,23 @@
     "enabled": false,
     "name": "Silnik glowny",
     "meterId": null,
+    "gpio": {
+      "stepPin": 18,
+      "directionPin": 23,
+      "enablePin": 24,
+      "enableActiveLow": true,
+      "pwmDutyCycle": 128
+    },
+    "feedback": {
+      "meterId": null,
+      "registerId": 0,
+      "tolerance": 0.2,
+      "proportionalGain": 35.0,
+      "minSpeedHz": 120.0,
+      "maxSpeedHz": 1000.0,
+      "invertDirection": false,
+      "autoStart": true
+    },
     "defaultSpeed": 25.0,
     "forwardValue": 1.0,
     "reverseValue": 0.0,

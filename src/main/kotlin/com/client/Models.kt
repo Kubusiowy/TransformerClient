@@ -159,9 +159,32 @@ data class MotorControlConfig(
     val runPin: WritePointConfig? = null,
     val directionPin: WritePointConfig? = null,
     val speedPin: WritePointConfig? = null,
+    val gpio: RaspberryPiGpioConfig? = null,
+    val feedback: MotorFeedbackConfig? = null,
     val defaultSpeed: Double = 0.0,
     val forwardValue: Double = 1.0,
     val reverseValue: Double = 0.0
+)
+
+@Serializable
+data class RaspberryPiGpioConfig(
+    val stepPin: Int,
+    val directionPin: Int,
+    val enablePin: Int? = null,
+    val enableActiveLow: Boolean = true,
+    val pwmDutyCycle: Int = 128
+)
+
+@Serializable
+data class MotorFeedbackConfig(
+    val meterId: Long? = null,
+    val registerId: Long,
+    val tolerance: Double? = null,
+    val proportionalGain: Double = 25.0,
+    val minSpeedHz: Double = 120.0,
+    val maxSpeedHz: Double = 1200.0,
+    val invertDirection: Boolean = false,
+    val autoStart: Boolean = true
 )
 
 @Serializable

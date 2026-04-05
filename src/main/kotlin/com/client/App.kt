@@ -480,7 +480,7 @@ private fun MotorControlCard(
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
-                text = "Sterownik: ${motorState.meter?.name ?: "brak przypisanego metra"}",
+                text = "Sprzezenie: ${buildFeedbackSummary(motorState)}",
                 color = Color(0xFF8FA3BF),
                 style = MaterialTheme.typography.bodySmall
             )
@@ -544,10 +544,20 @@ private fun MotorControlCard(
 private fun Double.formatNumber(): String = String.format(Locale.US, "%.3f", this)
 
 private fun buildPinSummary(config: MotorControlConfig): String {
+    config.gpio?.let { gpio ->
+        val enablePart = gpio.enablePin?.let { " | EN=$it" }.orEmpty()
+        return "STEP=${gpio.stepPin} | DIR=${gpio.directionPin}$enablePart"
+    }
     val items = listOfNotNull(
         config.runPin?.let { "RUN=${it.pinName}@${it.address}" },
         config.directionPin?.let { "DIR=${it.pinName}@${it.address}" },
         config.speedPin?.let { "SPEED=${it.pinName}@${it.address}" }
     )
     return items.joinToString(" | ").ifBlank { "brak mapowania" }
+}
+
+private fun buildFeedbackSummary(motorState: MotorControlState): String {
+    val feedback = motorState.config.feedback ?: return motorState.meter?.name ?: "brak przypisanego metra"
+    val meterName = motorState.meter?.name ?: "meter=${feedback.meterId ?: "auto"}"
+    return "$meterName, rejestr=${feedback.registerId}"
 }
