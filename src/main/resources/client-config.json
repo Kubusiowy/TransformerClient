@@ -3,11 +3,11 @@
   "email": "",
   "password": "",
   "transformerId": null,
-  "pollIntervalMs": 3000,
-  "configRefreshMs": 10000,
+  "pollIntervalMs": 100,
+  "configRefreshMs": 5000,
   "reconnectDelayMs": 3000,
-  "modbusTimeoutMs": 3000,
+  "modbusTimeoutMs": 250,
   "modbusRetries": 2,
   "modbusDiscardDelayMs": 150,
-  "interRegisterDelayMs": 30
+  "interRegisterDelayMs": 0
 }

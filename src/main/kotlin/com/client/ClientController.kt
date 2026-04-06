@@ -244,20 +244,21 @@ class ClientController {
                 master = modbus.connect(templateMeter)
                 meters.forEach { meter -> updateMeterStatus(meter.id, "CONNECTED", null) }
                 while (true) {
-                    val loopStart = Instant.now()
                     val currentMeters = _state.value.meters.map { it.meter }.filter { it.serialPort == serialPort }
                     if (currentMeters.isEmpty()) break
+                    val cycleStartedAtNs = System.nanoTime()
+                    val cycleTimestamp = Instant.now()
                     currentMeters.forEach { meter ->
                         updateMeterStatus(meter.id, "CONNECTED", null)
                         val registers = meterRegisters[meter.id]?.get().orEmpty()
                         registers.forEach { register ->
                             try {
                                 val value = modbus.readValue(master, meter, register)
-                                updateRegisterValue(meter.id, register.id, value, loopStart)
+                                updateRegisterValue(meter.id, register.id, value, cycleTimestamp)
                                 val metric = MetricPointRequest(
                                     key = "${meter.deviceCode}.${register.name}",
                                     value = value,
-                                    timestamp = loopStart.toString(),
+                                    timestamp = cycleTimestamp.toString(),
                                     unit = register.unit,
                                     label = register.name
                                 )
@@ -287,10 +288,12 @@ class ClientController {
                                 delay(config.interRegisterDelayMs)
                             }
                         }
-                        val meterDelay = meter.pollIntervalMs ?: config.pollIntervalMs
-                        if (meterDelay > 0) {
-                            delay(meterDelay)
-                        }
+                    }
+                    val cycleDelayMs = resolveCycleDelayMs(currentMeters)
+                    val elapsedMs = (System.nanoTime() - cycleStartedAtNs) / 1_000_000
+                    val remainingDelayMs = cycleDelayMs - elapsedMs
+                    if (remainingDelayMs > 0) {
+                        delay(remainingDelayMs)
                     }
                 }
             } catch (ex: Exception) {
@@ -310,6 +313,13 @@ class ClientController {
                 master?.destroy()
             }
         }
+    }
+
+    private fun resolveCycleDelayMs(meters: List<MeterDto>): Long {
+        val configuredDelay = config.pollIntervalMs.takeIf { it > 0 } ?: Long.MAX_VALUE
+        val backendDelay = meters.mapNotNull { it.pollIntervalMs?.takeIf { delay -> delay > 0 } }.minOrNull() ?: Long.MAX_VALUE
+        val effectiveDelay = minOf(configuredDelay, backendDelay)
+        return if (effectiveDelay == Long.MAX_VALUE) 0L else effectiveDelay
     }
 
     private fun shouldReconnectModbus(ex: Throwable): Boolean {
