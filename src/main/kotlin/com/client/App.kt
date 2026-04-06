@@ -57,11 +57,7 @@ fun main() = application {
                 state,
                 onLogin = controller::login,
                 onLogout = controller::logout,
-                onRegisterSettingsSave = controller::saveRegisterThresholds,
-                onMotorStart = controller::startMotor,
-                onMotorStop = controller::stopMotor,
-                onMotorDirectionChange = controller::setMotorDirection,
-                onMotorSpeedChange = controller::setMotorSpeed
+                onRegisterSettingsSave = controller::saveRegisterThresholds
             )
         }
     }
@@ -72,11 +68,7 @@ private fun AppUi(
     state: AppState,
     onLogin: (String, String, Boolean) -> Unit,
     onLogout: () -> Unit,
-    onRegisterSettingsSave: (Long, Long, String, String) -> Unit,
-    onMotorStart: () -> Unit,
-    onMotorStop: () -> Unit,
-    onMotorDirectionChange: (MotorDirection) -> Unit,
-    onMotorSpeedChange: (String) -> Unit
+    onRegisterSettingsSave: (Long, Long, String, String) -> Unit
 ) {
     val appBackground = Color(0xFF0C1220)
     Column(
@@ -97,16 +89,6 @@ private fun AppUi(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            state.motorControl?.let { motorState ->
-                MotorControlCard(
-                    motorState = motorState,
-                    onStart = onMotorStart,
-                    onStop = onMotorStop,
-                    onDirectionChange = onMotorDirectionChange,
-                    onSpeedSubmit = onMotorSpeedChange
-                )
-                Spacer(Modifier.height(12.dp))
-            }
             if (state.meters.isEmpty()) {
                 Text("Brak konfiguracji metrow lub brak polaczenia.", color = Color(0xFFE0E0E0))
             } else {
@@ -460,104 +442,4 @@ private fun StyledNumberField(
     )
 }
 
-@Composable
-private fun MotorControlCard(
-    motorState: MotorControlState,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
-    onDirectionChange: (MotorDirection) -> Unit,
-    onSpeedSubmit: (String) -> Unit
-) {
-    var speedValue by remember(motorState.speedSetpoint) {
-        mutableStateOf(motorState.speedSetpoint.formatNumber())
-    }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF111A2B)).padding(14.dp)) {
-            Text(
-                text = motorState.config.name,
-                color = Color(0xFFF4F7FB),
-                fontWeight = FontWeight.SemiBold,
-                style = MaterialTheme.typography.titleMedium
-            )
-            Text(
-                text = "Sprzezenie: ${buildFeedbackSummary(motorState)}",
-                color = Color(0xFF8FA3BF),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Text(
-                text = "Piny: ${buildPinSummary(motorState.config)}",
-                color = Color(0xFF8FA3BF),
-                style = MaterialTheme.typography.bodySmall
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = onStart, enabled = motorState.available) {
-                    Text("Start")
-                }
-                Button(onClick = onStop, enabled = motorState.available) {
-                    Text("Stop")
-                }
-                Button(onClick = { onDirectionChange(MotorDirection.FORWARD) }, enabled = motorState.available) {
-                    Text("Przod")
-                }
-                Button(onClick = { onDirectionChange(MotorDirection.REVERSE) }, enabled = motorState.available) {
-                    Text("Tyl")
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = speedValue,
-                    onValueChange = { speedValue = it },
-                    label = { Text("Predkosc zadana") },
-                    singleLine = true,
-                    modifier = Modifier.width(180.dp)
-                )
-                Button(onClick = { onSpeedSubmit(speedValue) }, enabled = motorState.available) {
-                    Text("Ustaw")
-                }
-                Text(
-                    text = if (motorState.isRunning) "Stan: PRACA" else "Stan: STOP",
-                    color = if (motorState.isRunning) Color(0xFF2ECC71) else Color(0xFFFFB454),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-            motorState.lastCommandStatus?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = it,
-                    color = Color(0xFF7DD3FC),
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            motorState.lastCommandAt?.let {
-                Text(
-                    text = "Ostatnia komenda: $it",
-                    color = Color(0xFF7E93AD),
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-        }
-    }
-}
-
 private fun Double.formatNumber(): String = String.format(Locale.US, "%.3f", this)
-
-private fun buildPinSummary(config: MotorControlConfig): String {
-    config.gpio?.let { gpio ->
-        val enablePart = gpio.enablePin?.let { " | EN=$it" }.orEmpty()
-        return "STEP=${gpio.stepPin} | DIR=${gpio.directionPin}$enablePart"
-    }
-    val items = listOfNotNull(
-        config.runPin?.let { "RUN=${it.pinName}@${it.address}" },
-        config.directionPin?.let { "DIR=${it.pinName}@${it.address}" },
-        config.speedPin?.let { "SPEED=${it.pinName}@${it.address}" }
-    )
-    return items.joinToString(" | ").ifBlank { "brak mapowania" }
-}
-
-private fun buildFeedbackSummary(motorState: MotorControlState): String {
-    val feedback = motorState.config.feedback ?: return motorState.meter?.name ?: "brak przypisanego metra"
-    val meterName = motorState.meter?.name ?: "meter=${feedback.meterId ?: "auto"}"
-    return "$meterName, rejestr=${feedback.registerId}"
-}

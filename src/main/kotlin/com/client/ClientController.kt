@@ -10,19 +10,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.nio.file.Files
 import java.nio.file.Path
 import com.serotonin.modbus4j.ModbusMaster
-import kotlin.math.abs
 
 class ClientController {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -37,9 +33,6 @@ class ClientController {
     private val configWatcherRunning = AtomicBoolean(false)
     private val portJobs = ConcurrentHashMap<String, kotlinx.coroutines.Job>()
     private val meterRegisters = ConcurrentHashMap<Long, AtomicReference<List<RegisterDto>>>()
-    private val motorMutex = Mutex()
-    private var stepperMotorDriver: StepperMotorDriver? = null
-    private var activeGpioConfig: RaspberryPiGpioConfig? = null
 
     fun start() {
         scope.launch {
@@ -67,9 +60,6 @@ class ClientController {
     }
 
     fun stop() {
-        stepperMotorDriver?.close()
-        stepperMotorDriver = null
-        activeGpioConfig = null
         scope.cancel()
     }
 
@@ -101,16 +91,12 @@ class ClientController {
             portJobs.values.forEach { it.cancel() }
             portJobs.clear()
             meterRegisters.clear()
-            stepperMotorDriver?.close()
-            stepperMotorDriver = null
-            activeGpioConfig = null
             api.clearSession()
             _state.update {
                 it.copy(
                     status = "Wylogowano.",
                     transformer = null,
                     meters = emptyList(),
-                    motorControl = null,
                     isLoggedIn = false,
                     loginError = null
                 )
@@ -176,74 +162,8 @@ class ClientController {
             it.copy(
                 status = buildStatusMessage(warnings),
                 transformer = transformer,
-                meters = updatedMeterStates,
-                motorControl = mergeMotorControlState(updatedMeterStates, it.motorControl)
+                meters = updatedMeterStates
             )
-        }
-        if (config.motorControl?.gpio == null) {
-            stepperMotorDriver?.close()
-            stepperMotorDriver = null
-            activeGpioConfig = null
-        }
-    }
-
-    fun startMotor() {
-        scope.launch {
-            executeMotorCommand("Start silnika") { current ->
-                applyMotorHardware(
-                    current = current,
-                    running = true,
-                    direction = current.direction,
-                    speed = current.speedSetpoint
-                )
-            }
-        }
-    }
-
-    fun stopMotor() {
-        scope.launch {
-            executeMotorCommand("Stop silnika") { current ->
-                applyMotorHardware(
-                    current = current,
-                    running = false,
-                    direction = current.direction,
-                    speed = current.speedSetpoint
-                )
-            }
-        }
-    }
-
-    fun setMotorDirection(direction: MotorDirection) {
-        scope.launch {
-            executeMotorCommand(
-                label = if (direction == MotorDirection.FORWARD) "Kierunek przod" else "Kierunek tyl",
-                updateStateOnly = false
-            ) { current ->
-                applyMotorHardware(
-                    current = current,
-                    running = current.isRunning,
-                    direction = direction,
-                    speed = current.speedSetpoint
-                )
-            }
-        }
-    }
-
-    fun setMotorSpeed(speedText: String) {
-        scope.launch {
-            val speed = speedText.replace(',', '.').toDoubleOrNull()
-            if (speed == null) {
-                updateMotorStatus("Nieprawidlowa wartosc predkosci")
-                return@launch
-            }
-            executeMotorCommand("Zadanie predkosci $speed", updateStateOnly = false) { current ->
-                applyMotorHardware(
-                    current = current,
-                    running = current.isRunning,
-                    direction = current.direction,
-                    speed = speed
-                )
-            }
         }
     }
 
@@ -274,12 +194,6 @@ class ClientController {
             config = config.copy(localRegisterSettings = updatedSettings)
             ConfigLoader.save(config)
             applyLocalRegisterSettings(meterId, registerId)
-            _state.value.meters
-                .firstOrNull { it.meter.id == meterId }
-                ?.registers
-                ?.firstOrNull { it.register.id == registerId }
-                ?.value
-                ?.let { currentValue -> scheduleAutomaticMotorAdjustment(meterId, registerId, currentValue) }
             _state.update { it.copy(status = "Zapisano lokalne ustawienia rejestru.") }
         }
     }
@@ -483,7 +397,6 @@ class ClientController {
                 }
             )
         }
-        scheduleAutomaticMotorAdjustment(meterId, registerId, value)
         val transition = alarmTransition ?: return
         val status = if (transition.active) "ALARM" else "OK"
         val message = if (transition.active) {
@@ -525,199 +438,6 @@ class ClientController {
                         )
                     }
                 }
-            )
-        }
-    }
-
-    private fun mergeMotorControlState(
-        meters: List<MeterState>,
-        existing: MotorControlState?
-    ): MotorControlState? {
-        val config = config.motorControl?.takeIf { it.enabled } ?: return null
-        val meter = resolveMotorMeter(config, meters)
-            ?: meters.firstOrNull()?.meter
-        val available = when {
-            config.gpio != null -> isGpioRuntimeAvailable()
-            else -> meter != null
-        }
-        return if (existing == null || existing.config != config || existing.meter?.id != meter?.id) {
-            MotorControlState(
-                config = config,
-                meter = meter,
-                available = available,
-                isRunning = existing?.isRunning ?: false,
-                direction = existing?.direction ?: MotorDirection.FORWARD,
-                speedSetpoint = existing?.speedSetpoint ?: config.defaultSpeed,
-                lastCommandStatus = existing?.lastCommandStatus,
-                lastCommandAt = existing?.lastCommandAt
-            )
-        } else {
-            existing.copy(config = config, meter = meter, available = available)
-        }
-    }
-
-    private fun resolveMotorMeter(config: MotorControlConfig, meters: List<MeterState>): MeterDto? {
-        val preferredId = config.feedback?.meterId ?: config.meterId
-        return preferredId?.let { targetId -> meters.firstOrNull { it.meter.id == targetId }?.meter }
-    }
-
-    private fun scheduleAutomaticMotorAdjustment(meterId: Long, registerId: Long, value: Double) {
-        val motorState = _state.value.motorControl ?: return
-        val feedback = motorState.config.feedback ?: return
-        val feedbackMeterId = feedback.meterId ?: motorState.meter?.id ?: meterId
-        if (meterId != feedbackMeterId || registerId != feedback.registerId) return
-
-        scope.launch {
-            executeMotorCommand("Automatyczna korekta", updateStateOnly = false) adjustment@{ current ->
-                val registerState = _state.value.meters
-                    .firstOrNull { it.meter.id == meterId }
-                    ?.registers
-                    ?.firstOrNull { it.register.id == registerId }
-                    ?: return@adjustment current
-
-                val target = registerState.register.targetValue
-                if (target == null) {
-                    if (!current.isRunning) return@adjustment current
-                    return@adjustment applyMotorHardware(
-                        current = current,
-                        running = false,
-                        direction = current.direction,
-                        speed = current.speedSetpoint
-                    )
-                }
-
-                val tolerance = feedback.tolerance ?: registerState.register.thresholdValue ?: 0.0
-                val error = target - value
-                if (abs(error) <= tolerance) {
-                    if (!current.isRunning) return@adjustment current
-                    return@adjustment applyMotorHardware(
-                        current = current,
-                        running = false,
-                        direction = current.direction,
-                        speed = current.speedSetpoint
-                    )
-                }
-
-                val direction = resolveAutomaticDirection(error, feedback)
-                val speed = calculateAutomaticSpeed(abs(error), feedback)
-                val running = feedback.autoStart || current.isRunning
-                applyMotorHardware(
-                    current = current,
-                    running = running,
-                    direction = direction,
-                    speed = speed
-                )
-            }
-        }
-    }
-
-    private suspend fun applyMotorHardware(
-        current: MotorControlState,
-        running: Boolean,
-        direction: MotorDirection,
-        speed: Double
-    ): MotorControlState {
-        val gpio = current.config.gpio
-        if (gpio != null) {
-            if (activeGpioConfig != gpio) {
-                stepperMotorDriver?.close()
-                stepperMotorDriver = null
-                activeGpioConfig = gpio
-            }
-            val driver = stepperMotorDriver ?: PigpioStepperMotorDriver(gpio).also { stepperMotorDriver = it }
-            driver.apply(
-                StepperMotorCommand(
-                    running = running,
-                    direction = direction,
-                    speedHz = speed
-                )
-            )
-            return current.copy(
-                isRunning = running,
-                direction = direction,
-                speedSetpoint = speed
-            )
-        }
-
-        val meter = current.meter ?: error("Brak przypisanego metra dla sterowania silnikiem")
-        var master: ModbusMaster? = null
-        try {
-            master = modbus.connect(meter)
-            current.config.directionPin?.let { pin ->
-                val directionValue = when (direction) {
-                    MotorDirection.FORWARD -> current.config.forwardValue
-                    MotorDirection.REVERSE -> current.config.reverseValue
-                }
-                modbus.writeValue(master, meter, pin, directionValue)
-            }
-            current.config.speedPin?.let { pin ->
-                modbus.writeValue(master, meter, pin, speed)
-            }
-            current.config.runPin?.let { pin ->
-                modbus.writeValue(master, meter, pin, if (running) pin.activeValue else pin.inactiveValue)
-            }
-            return current.copy(
-                isRunning = running,
-                direction = direction,
-                speedSetpoint = speed
-            )
-        } finally {
-            master?.destroy()
-        }
-    }
-
-    private fun calculateAutomaticSpeed(error: Double, feedback: MotorFeedbackConfig): Double {
-        val requested = error * feedback.proportionalGain
-        return requested.coerceIn(feedback.minSpeedHz, feedback.maxSpeedHz)
-    }
-
-    private fun resolveAutomaticDirection(error: Double, feedback: MotorFeedbackConfig): MotorDirection {
-        val positiveDirection = if (feedback.invertDirection) MotorDirection.REVERSE else MotorDirection.FORWARD
-        return if (error >= 0.0) positiveDirection else oppositeDirection(positiveDirection)
-    }
-
-    private fun oppositeDirection(direction: MotorDirection): MotorDirection {
-        return if (direction == MotorDirection.FORWARD) MotorDirection.REVERSE else MotorDirection.FORWARD
-    }
-
-    private suspend fun executeMotorCommand(
-        label: String,
-        updateStateOnly: Boolean = true,
-        action: suspend (MotorControlState) -> MotorControlState
-    ) {
-        motorMutex.withLock {
-            val current = _state.value.motorControl
-            if (current == null) {
-                _state.update { it.copy(status = "Sterowanie silnikiem nie jest skonfigurowane.") }
-                return
-            }
-            try {
-                val updated = action(current)
-                _state.update {
-                    it.copy(
-                        motorControl = updated.copy(
-                            lastCommandStatus = "$label OK",
-                            lastCommandAt = Instant.now()
-                        ),
-                        status = if (updateStateOnly) "Sterowanie silnikiem gotowe" else "$label OK"
-                    )
-                }
-            } catch (ex: Exception) {
-                if (ex is CancellationException) throw ex
-                logError("Blad sterowania silnikiem", ex)
-                updateMotorStatus("$label: ${ex.message}")
-            }
-        }
-    }
-
-    private fun updateMotorStatus(status: String) {
-        _state.update { current ->
-            current.copy(
-                status = status,
-                motorControl = current.motorControl?.copy(
-                    lastCommandStatus = status,
-                    lastCommandAt = Instant.now()
-                )
             )
         }
     }
@@ -782,31 +502,6 @@ class ClientController {
             }
         }
 
-        config.motorControl?.takeIf { it.enabled }?.let { motor ->
-            val referencedMeterId = motor.feedback?.meterId ?: motor.meterId
-            if (referencedMeterId != null && referencedMeterId !in availableMeterIds) {
-                warnings += "Sterowanie silnikiem wskazuje nieistniejacy meterId=$referencedMeterId"
-            }
-
-            motor.feedback?.let { feedback ->
-                val feedbackMeterId = feedback.meterId ?: motor.meterId ?: meters.firstOrNull()?.meter?.id
-                if (feedbackMeterId == null) {
-                    warnings += "Sterowanie silnikiem nie ma przypisanego metra do sprzezenia"
-                } else if ((feedbackMeterId to feedback.registerId) !in availableRegisters) {
-                    warnings += "Sprzezenie silnika wskazuje nieistniejacy registerId=${feedback.registerId} dla meterId=$feedbackMeterId"
-                }
-            }
-
-            if (motor.gpio != null) {
-                if (!isLinux()) {
-                    warnings += "GPIO pigs wymaga Linux/Raspberry Pi"
-                }
-                if (!isCommandAvailable("pigs")) {
-                    warnings += "Brak polecenia pigs w PATH"
-                }
-            }
-        }
-
         meters.map { it.meter.serialPort }.distinct().forEach { port ->
             if (!pathExists(port)) {
                 warnings += "Brak portu szeregowego $port"
@@ -814,26 +509,6 @@ class ClientController {
         }
 
         return warnings.toList()
-    }
-
-    private fun isGpioRuntimeAvailable(): Boolean {
-        return isLinux() && isCommandAvailable("pigs")
-    }
-
-    private fun isLinux(): Boolean {
-        return System.getProperty("os.name").contains("Linux", ignoreCase = true)
-    }
-
-    private fun isCommandAvailable(command: String): Boolean {
-        val path = System.getenv("PATH").orEmpty()
-        if (path.isBlank()) return false
-        return path
-            .split(File.pathSeparator)
-            .asSequence()
-            .mapNotNull { directory ->
-                directory.takeIf { it.isNotBlank() }?.let { Path.of(it, command) }
-            }
-            .any { Files.isRegularFile(it) && Files.isExecutable(it) }
     }
 
     private fun pathExists(path: String): Boolean {

@@ -1,6 +1,5 @@
 package com.client
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import java.time.Instant
 
@@ -18,8 +17,7 @@ data class ClientConfig(
     val modbusDiscardDelayMs: Int = 50,
     val interRegisterDelayMs: Long = 0,
     val rememberCredentials: Boolean = false,
-    val localRegisterSettings: List<LocalRegisterSettings> = emptyList(),
-    val motorControl: MotorControlConfig? = null
+    val localRegisterSettings: List<LocalRegisterSettings> = emptyList()
 )
 
 @Serializable
@@ -105,7 +103,6 @@ data class AppState(
     val status: String,
     val transformer: TransformerDto?,
     val meters: List<MeterState>,
-    val motorControl: MotorControlState?,
     val isLoggedIn: Boolean,
     val loginError: String?,
     val loginPrefillEmail: String,
@@ -117,7 +114,6 @@ data class AppState(
             status = "Uruchamianie...",
             transformer = null,
             meters = emptyList(),
-            motorControl = null,
             isLoggedIn = false,
             loginError = null,
             loginPrefillEmail = "",
@@ -150,66 +146,3 @@ data class LocalRegisterSettings(
     val targetValue: Double? = null,
     val thresholdValue: Double? = null
 )
-
-@Serializable
-data class MotorControlConfig(
-    val enabled: Boolean = false,
-    val name: String = "Silnik",
-    val meterId: Long? = null,
-    val runPin: WritePointConfig? = null,
-    val directionPin: WritePointConfig? = null,
-    val speedPin: WritePointConfig? = null,
-    val gpio: RaspberryPiGpioConfig? = null,
-    val feedback: MotorFeedbackConfig? = null,
-    val defaultSpeed: Double = 0.0,
-    val forwardValue: Double = 1.0,
-    val reverseValue: Double = 0.0
-)
-
-@Serializable
-data class RaspberryPiGpioConfig(
-    val stepPin: Int,
-    val directionPin: Int,
-    val enablePin: Int? = null,
-    val enableActiveLow: Boolean = true,
-    val pwmDutyCycle: Int = 128
-)
-
-@Serializable
-data class MotorFeedbackConfig(
-    val meterId: Long? = null,
-    val registerId: Long,
-    val tolerance: Double? = null,
-    val proportionalGain: Double = 25.0,
-    val minSpeedHz: Double = 120.0,
-    val maxSpeedHz: Double = 1200.0,
-    val invertDirection: Boolean = false,
-    val autoStart: Boolean = true
-)
-
-@Serializable
-data class WritePointConfig(
-    val pinName: String,
-    val registerType: String = "HOLDING",
-    val address: Int,
-    val dataType: String = "INT16",
-    val activeValue: Double = 1.0,
-    val inactiveValue: Double = 0.0,
-    val scale: Double = 1.0
-)
-
-data class MotorControlState(
-    val config: MotorControlConfig,
-    val meter: MeterDto?,
-    val available: Boolean,
-    val isRunning: Boolean,
-    val direction: MotorDirection,
-    val speedSetpoint: Double,
-    val lastCommandStatus: String?,
-    val lastCommandAt: Instant?
-)
-
-enum class MotorDirection {
-    FORWARD,
-    REVERSE
-}

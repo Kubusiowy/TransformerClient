@@ -9,57 +9,5 @@
   "modbusTimeoutMs": 3000,
   "modbusRetries": 2,
   "modbusDiscardDelayMs": 150,
-  "interRegisterDelayMs": 30,
-  "motorControl": {
-    "enabled": false,
-    "name": "Silnik glowny",
-    "meterId": null,
-    "gpio": {
-      "stepPin": 23,
-      "directionPin": 22,
-      "enablePin": 24,
-      "enableActiveLow": true,
-      "pwmDutyCycle": 128
-    },
-    "feedback": {
-      "meterId": null,
-      "registerId": 0,
-      "tolerance": 0.2,
-      "proportionalGain": 35.0,
-      "minSpeedHz": 120.0,
-      "maxSpeedHz": 1000.0,
-      "invertDirection": false,
-      "autoStart": true
-    },
-    "defaultSpeed": 25.0,
-    "forwardValue": 1.0,
-    "reverseValue": 0.0,
-    "runPin": {
-      "pinName": "DO_RUN",
-      "registerType": "COIL",
-      "address": 1,
-      "dataType": "BOOLEAN",
-      "activeValue": 1.0,
-      "inactiveValue": 0.0,
-      "scale": 1.0
-    },
-    "directionPin": {
-      "pinName": "DO_DIR",
-      "registerType": "COIL",
-      "address": 2,
-      "dataType": "BOOLEAN",
-      "activeValue": 1.0,
-      "inactiveValue": 0.0,
-      "scale": 1.0
-    },
-    "speedPin": {
-      "pinName": "AO_SPEED",
-      "registerType": "HOLDING",
-      "address": 40010,
-      "dataType": "INT16",
-      "activeValue": 0.0,
-      "inactiveValue": 0.0,
-      "scale": 1.0
-    }
-  }
+  "interRegisterDelayMs": 30
 }

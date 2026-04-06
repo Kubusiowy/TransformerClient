@@ -54,28 +54,6 @@ class ModbusReader(private val config: ClientConfig) {
         }
     }
 
-    fun writeValue(master: ModbusMaster, meter: MeterDto, point: WritePointConfig, value: Double) {
-        val offset = normalizeAddress(point.address)
-        val locator = createLocator(meter, point.registerType, point.dataType, offset)
-        val scaledValue = if (point.scale == 0.0) value else value / point.scale
-        val payload: Any = when (point.dataType.uppercase()) {
-            "BOOLEAN", "BOOL" -> scaledValue >= 0.5
-            "FLOAT32" -> scaledValue.toFloat()
-            "INT32" -> scaledValue.toLong().toInt()
-            else -> scaledValue.toInt()
-        }
-        try {
-            master.setValue(locator, payload)
-        } catch (ex: Exception) {
-            logError(
-                "Modbus write: slaveId=${meter.slaveId}, port=${meter.serialPort}, " +
-                    "pin=${point.pinName}, regType=${point.registerType}, dataType=${point.dataType}, addr=${point.address}",
-                ex
-            )
-            throw ex
-        }
-    }
-
     private fun createLocator(meter: MeterDto, registerType: String, dataTypeName: String, offset: Int): BaseLocator<*> {
         val type = registerType.uppercase()
         return when (type) {
