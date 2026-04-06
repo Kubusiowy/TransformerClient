@@ -16,8 +16,11 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.nio.file.Files
+import java.nio.file.Path
 import com.serotonin.modbus4j.ModbusMaster
 import kotlin.math.abs
 
@@ -167,10 +170,11 @@ class ClientController {
             )
         }
         ensurePortPolling(transformer.id, meters)
+        val warnings = collectConfigurationWarnings(updatedMeterStates)
 
         _state.update {
             it.copy(
-                status = "Konfiguracja OK",
+                status = buildStatusMessage(warnings),
                 transformer = transformer,
                 meters = updatedMeterStates,
                 motorControl = mergeMotorControlState(updatedMeterStates, it.motorControl)
@@ -532,7 +536,10 @@ class ClientController {
         val config = config.motorControl?.takeIf { it.enabled } ?: return null
         val meter = resolveMotorMeter(config, meters)
             ?: meters.firstOrNull()?.meter
-        val available = config.gpio != null || meter != null
+        val available = when {
+            config.gpio != null -> isGpioRuntimeAvailable()
+            else -> meter != null
+        }
         return if (existing == null || existing.config != config || existing.meter?.id != meter?.id) {
             MotorControlState(
                 config = config,
@@ -743,6 +750,97 @@ class ClientController {
             "Alarm: $value > prog $threshold"
         } else {
             null
+        }
+    }
+
+    private fun buildStatusMessage(warnings: List<String>): String {
+        if (warnings.isEmpty()) return "Konfiguracja OK"
+        return warnings.joinToString(
+            separator = " | ",
+            prefix = "Wymaga uwagi: ",
+            limit = 3,
+            truncated = "..."
+        )
+    }
+
+    private fun collectConfigurationWarnings(meters: List<MeterState>): List<String> {
+        val warnings = linkedSetOf<String>()
+        val availableMeterIds = meters.map { it.meter.id }.toSet()
+        val availableRegisters = meters
+            .flatMap { meterState -> meterState.registers.map { meterState.meter.id to it.register.id } }
+            .toSet()
+
+        config.localRegisterSettings.forEach { settings ->
+            when {
+                settings.meterId !in availableMeterIds -> {
+                    warnings += "Lokalne ustawienia wskazuja nieistniejacy meterId=${settings.meterId}"
+                }
+
+                (settings.meterId to settings.registerId) !in availableRegisters -> {
+                    warnings += "Lokalne ustawienia wskazuja nieistniejacy registerId=${settings.registerId} dla meterId=${settings.meterId}"
+                }
+            }
+        }
+
+        config.motorControl?.takeIf { it.enabled }?.let { motor ->
+            val referencedMeterId = motor.feedback?.meterId ?: motor.meterId
+            if (referencedMeterId != null && referencedMeterId !in availableMeterIds) {
+                warnings += "Sterowanie silnikiem wskazuje nieistniejacy meterId=$referencedMeterId"
+            }
+
+            motor.feedback?.let { feedback ->
+                val feedbackMeterId = feedback.meterId ?: motor.meterId ?: meters.firstOrNull()?.meter?.id
+                if (feedbackMeterId == null) {
+                    warnings += "Sterowanie silnikiem nie ma przypisanego metra do sprzezenia"
+                } else if ((feedbackMeterId to feedback.registerId) !in availableRegisters) {
+                    warnings += "Sprzezenie silnika wskazuje nieistniejacy registerId=${feedback.registerId} dla meterId=$feedbackMeterId"
+                }
+            }
+
+            if (motor.gpio != null) {
+                if (!isLinux()) {
+                    warnings += "GPIO pigs wymaga Linux/Raspberry Pi"
+                }
+                if (!isCommandAvailable("pigs")) {
+                    warnings += "Brak polecenia pigs w PATH"
+                }
+            }
+        }
+
+        meters.map { it.meter.serialPort }.distinct().forEach { port ->
+            if (!pathExists(port)) {
+                warnings += "Brak portu szeregowego $port"
+            }
+        }
+
+        return warnings.toList()
+    }
+
+    private fun isGpioRuntimeAvailable(): Boolean {
+        return isLinux() && isCommandAvailable("pigs")
+    }
+
+    private fun isLinux(): Boolean {
+        return System.getProperty("os.name").contains("Linux", ignoreCase = true)
+    }
+
+    private fun isCommandAvailable(command: String): Boolean {
+        val path = System.getenv("PATH").orEmpty()
+        if (path.isBlank()) return false
+        return path
+            .split(File.pathSeparator)
+            .asSequence()
+            .mapNotNull { directory ->
+                directory.takeIf { it.isNotBlank() }?.let { Path.of(it, command) }
+            }
+            .any { Files.isRegularFile(it) && Files.isExecutable(it) }
+    }
+
+    private fun pathExists(path: String): Boolean {
+        return try {
+            Files.exists(Path.of(path))
+        } catch (_: Exception) {
+            false
         }
     }
 
